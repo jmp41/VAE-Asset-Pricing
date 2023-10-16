@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
+from tqdm import tqdm
 
 MAX_EPOCH = 200
         
@@ -39,6 +40,9 @@ class CVAE_base(nn.Module, modelBase):
         self.valid_dataloader = None
         self.test_dataloader = None
 
+        self.pently_lambda = None
+        self.repeat = 2
+        self.lr = None
     
     def debug(self, month):
         beta_nn_input = self.p_charas.loc[self.p_charas['DATE'] == month][CHARAS_LIST]
@@ -102,7 +106,10 @@ class CVAE_base(nn.Module, modelBase):
             factor_nn_input = factor_nn_input.squeeze(0).T
             labels = labels.squeeze(0)
             output, mu, log_var = self.forward(beta_nn_input, factor_nn_input)
-            loss = self.criterion(output, labels) + self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+            l1_regulization = torch.Tensor([torch.norm(i,p=1) for i in self.parameters()])
+
+            loss = self.criterion(output, labels) + self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0) + \
+                self.pently_lambda * torch.sum(l1_regulization)
             
             loss.backward()
             self.optimizer.step()
@@ -125,9 +132,10 @@ class CVAE_base(nn.Module, modelBase):
             labels = labels.squeeze(0)
 
             output, mu, log_var = self.forward(beta_nn_input, factor_nn_input)
-            loss = self.criterion(output, labels)
-            epoch_loss += loss.item()+ self.lambdas * torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+            loss = self.criterion(output, labels) + self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
 
+            epoch_loss += loss.item()
+            
         return epoch_loss / len(self.valid_dataloader)
     
     
@@ -139,61 +147,80 @@ class CVAE_base(nn.Module, modelBase):
         self.valid_dataloader = self.dataloader(self.valid_period)
         self.test_dataloader = self.dataloader(self.test_period)
         
-        min_error = np.Inf
-        no_update_steps = 0
-        valid_loss = []
-        train_loss = []
-        for i in range(MAX_EPOCH):
-            # print(f'Epoch {i}')
-            self.train()
-            train_error = self.__train_one_epoch()
-            train_loss.append(train_error)
-            
-            self.eval()
-            # valid and early stop
-            with torch.no_grad():
-                valid_error = self.__valid_one_epoch()
+        train_info = collections.defaultdict(int)
+        valid_info = collections.defaultdict(int)
+        for times in range(self.repeat):
+            print(f'Start Training Model ({times})')
+            min_error = np.Inf
+            no_update_steps = 0
+            valid_loss = []
+            train_loss = []
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+            self.reset_weight()
+            pbar = tqdm(np.arange(MAX_EPOCH), desc=f"Training")
+            for i in pbar:
+                # print(f'Epoch {i}')
+                self.train()
+                train_error = self.__train_one_epoch()
+                train_loss.append(train_error)
                 
-            valid_loss.append(valid_error)
-            if valid_error < min_error:
-                min_error = valid_error
-                no_update_steps = 0
-                # save model
-                torch.save(self.state_dict(), f'./saved_models/{self.name}.pt')
-            else:
-                no_update_steps += 1
-            
-            if no_update_steps > 2: # early stop, if consecutive 3 epoches no improvement on validation set
-                print(f'Early stop at epoch {i}')
-                break
-            # load from (best) saved model
-            self.load_state_dict(torch.load(f'./saved_models/{self.name}.pt'))
-        return train_loss, valid_loss
+                self.eval()
+                # valid and early stop
+                with torch.no_grad():
+                    valid_error = self.__valid_one_epoch()
+                pbar.set_postfix({f'train loss': np.mean(train_error), f'valid loss':np.mean(valid_error)})
+                valid_loss.append(valid_error)
+                if valid_error < min_error:
+                    min_error = valid_error
+                    no_update_steps = 0
+                    # save model
+                    torch.save(self.state_dict(), f'./saved_models/{times}{self.name}.pt')
+                else:
+                    no_update_steps += 1
+                
+                if no_update_steps > 5: # early stop, if consecutive 3 epoches no improvement on validation set
+                    print(f'Early stop at epoch {i}')
+                    break
+                # load from (best) saved model
+                self.load_state_dict(torch.load(f'./saved_models/{times}{self.name}.pt'))
+                
+            train_info[times] = train_loss
+            valid_info[times] = valid_loss
+        self.load_ensemble_model()
+        return train_info, valid_info
+
+        
+    def load_ensemble_model(self):
+        params_list = collections.deque(maxlen=self.repeat)
+        for num_model in range(self.repeat):
+            # print(f'./saved_models/{num_model}{self.name}.pt')
+            self.load_state_dict(torch.load(f'./saved_models/{num_model}{self.name}.pt'))
+            params = self.state_dict()
+            params_list.append(params)
+        avg_params = self.average_params(params_list)        
+        self.load_state_dict(avg_params)
+
     
+        # ensemble estimation
+    def average_params(self, params_list):
+        assert isinstance(params_list, (tuple, list, collections.deque))
+        n = len(params_list)
+        if n == 1:
+            return params_list[0]
+        new_params = collections.OrderedDict()
+        keys = None
+        for i, params in enumerate(params_list):
+            if keys is None:
+                keys = params.keys()
+            for k, v in params.items():
+                if k not in keys:
+                    raise ValueError('the %d-th model has different params'%i)
+                if k not in new_params:
+                    new_params[k] = v / n
+                else:
+                    new_params[k] += v / n
+        return new_params
     
-    def test_model(self):
-        # beta, factor, label = self.test_dataset
-        # i = np.random.randint(len(beta))
-        # beta_nn_input = beta[i]
-        # factor_nn_input = factor[i]
-        # labels = label[i]
-        output = None
-        label = None
-        for i, beta_nn_input, factor_nn_input, labels in enumerate(self.test_dataloader):
-            # convert to tensor
-            # beta_nn_input = torch.tensor(beta_nn_input, dtype=torch.float32).T.to(self.device)
-            # factor_nn_input = torch.tensor(factor_nn_input, dtype=torch.float32).T.to(self.device)
-            # labels = torch.tensor(labels, dtype=torch.float32).T.to(self.device)
-            output,mu,log_var = self.forward(beta_nn_input, factor_nn_input)
-            break
-
-        loss = self.criterion(output, labels)+self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-
-        print(f'Test loss: {loss.item()}')
-        print(f'Predicted: {output}')
-        print(f'Ground truth: {labels}')
-        return output, labels
-
 
     def calBeta(self, month, skip_char=[]):
         _, beta_nn_input, _, _ = self._get_item(month) # beta input: 94*94 = P*N
@@ -262,8 +289,8 @@ class CVAE_base(nn.Module, modelBase):
         for layer in self.beta_nn: # reset beta_nn parameters
             if hasattr(layer, 'reset_parameters'):
                 layer.reset_parameters()
-        
-        for layer in self.factor_nn: # reset factor_nn parameters
+
+        for layer in self.factor_nn.children(): # reset factor_nn parameters
             if hasattr(layer, 'reset_parameters'):
                 layer.reset_parameters()
                 
@@ -288,11 +315,11 @@ class LinearVAE(nn.Module):
         self.fc_mu = nn.Linear(hidden_size, latent_dim)
         self.fc_var = nn.Linear(hidden_size, latent_dim)
         self.decoder = nn.Linear(latent_dim, hidden_size)
-        self.final_layer = nn.Linear(hidden_size, 1)
+        self.final_layer = nn.Linear(hidden_size, hidden_size)
     
     def encode(self,inputs):
         result = self.encoder(inputs)
-        result = torch.flatten(result, start_dim=1)
+        # result = torch.flatten(result, start_dim=1)
 
         # Split the result into mu and var components
         # of the latent Gaussian distribution
@@ -328,7 +355,7 @@ class CVAE(nn.Module):
         super(CVAE, self).__init__()
         
         modules = []
-        hidden_dims = [hidden_size//2, hidden_size, hidden_size*2]
+        hidden_dims = [hidden_size*4, hidden_size*2, hidden_size]
         in_channels = 94
         # Build Encoder
         for h_dim in hidden_dims:
@@ -390,8 +417,8 @@ class CVAE(nn.Module):
 
 
 class CVAE0(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, lr=0.001, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE0_{hidden_size}', omit_char=omit_char, device=device)
+    def __init__(self, hidden_size, latent_dim, lambdas, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE0_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
         # P -> K
 
         self.beta_nn = nn.Sequential(
@@ -400,15 +427,16 @@ class CVAE0(CVAE_base):
         )
         self.factor_nn = LinearVAE(hidden_size, latent_dim)
 
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         self.lambdas = lambdas
     
 
 
 class CVAE1(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.5, lr=0.001, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE1_{hidden_size}', omit_char=omit_char, device=device)
+    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE1_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -422,14 +450,15 @@ class CVAE1(CVAE_base):
         )
         self.factor_nn = CVAE(hidden_size, latent_dim)
         
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         self.lambdas = lambdas
         
 
 class CVAE2(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.5, lr=0.001, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE2_{hidden_size}', omit_char=omit_char, device=device)
+    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE2_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -448,14 +477,15 @@ class CVAE2(CVAE_base):
         )
         self.factor_nn = CVAE(hidden_size, latent_dim)
         
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         self.lambdas = lambdas
         
 
 class CVAE3(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.5, lr=0.001, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE3_{hidden_size}', omit_char=omit_char, device=device)
+    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE3_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -479,13 +509,15 @@ class CVAE3(CVAE_base):
         )
         self.factor_nn = CVAE(hidden_size, latent_dim)
         
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         self.lambdas = lambdas
 
 if __name__=='__main__':
-    hidden_size = 64
-    latent_size = 16
+    hidden_size = 6
+    latent_size = 3
     lambdas = 1
-    model = CVAE1(hidden_size, latent_size, lambdas)
+    pently_lambda = 0.01
+    model = CVAE1(hidden_size, latent_size, lambdas,lr=0.0001, pently_lambda=pently_lambda)
     model.train_model()
