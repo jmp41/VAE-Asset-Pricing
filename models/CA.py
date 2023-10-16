@@ -41,8 +41,7 @@ class CA_base(nn.Module, modelBase):
         self.test_dataloader = None
         
         self.pently_lambda = None
-        self.repeat = 10
-        self.smooth_steps = 5
+        self.repeat = 2
         self.lr = None
     
     
@@ -213,7 +212,9 @@ class CA_base(nn.Module, modelBase):
     def load_ensemble_model(self):
         params_list = collections.deque(maxlen=self.repeat)
         for num_model in range(self.repeat):
-            params = self.load_state_dict(f'./saved_models/{num_model}{self.name}.pt')
+            # print(f'./saved_models/{num_model}{self.name}.pt')
+            self.load_state_dict(torch.load(f'./saved_models/{num_model}{self.name}.pt'))
+            params = self.state_dict()
             params_list.append(params)
         avg_params = self.average_params(params_list)        
         self.load_state_dict(avg_params)
@@ -222,18 +223,16 @@ class CA_base(nn.Module, modelBase):
     def test_model(self):
         self.load_ensemble_model()
         output = None
-        for i, beta_nn_input, factor_nn_input, labels in enumerate(self.test_dataloader):
-            # convert to tensor
-            # beta_nn_input = torch.tensor(beta_nn_input, dtype=torch.float32).T.to(self.device)
-            # factor_nn_input = torch.tensor(factor_nn_input, dtype=torch.float32).T.to(self.device)
-            # labels = torch.tensor(labels, dtype=torch.float32).T.to(self.device)
+        for i, (beta_nn_input, factor_nn_input, labels) in enumerate(self.test_dataloader):
+            beta_nn_input = beta_nn_input.squeeze(0).T
+            factor_nn_input = factor_nn_input.squeeze(0).T
+            labels = labels.squeeze(0)
             output = self.forward(beta_nn_input, factor_nn_input)
-            break
 
         loss = self.criterion(output, labels)
         print(f'Test loss: {loss.item()}')
-        print(f'Predicted: {output}')
-        print(f'Ground truth: {labels}')
+        # print(f'Predicted: {output}')
+        # print(f'Ground truth: {labels}')
         return output, labels
 
 
@@ -437,7 +436,7 @@ class CA3(CA_base):
         self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
 
-if __name__ == '__main__':
-    ca_model = CA0(2, lr=0.0005, pently_lambda = 0.02)
-    print(ca_model.test_period)
-    # ca_model.train_model()
+# if __name__ == '__main__':
+#     ca_model = CA0(2, lr=0.0005, pently_lambda = 0.02)
+#     ca_model.train_model()
+#     ca_model.inference(19870101)

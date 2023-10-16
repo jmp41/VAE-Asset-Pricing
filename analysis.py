@@ -107,6 +107,8 @@ def plot_R2_bar(R_df, type):
     CA3 = (R_df.loc[R_df['Model']=='CA3'][1]*100).to_list()
     CVAE0 = (R_df.loc[R_df['Model']=='CVAE0'][1]*100).to_list()
     CVAE1 = (R_df.loc[R_df['Model']=='CVAE1'][1]*100).to_list()
+    CVAE2 = (R_df.loc[R_df['Model']=='CVAE2'][1]*100).to_list()
+    CVAE3 = (R_df.loc[R_df['Model']=='CVAE3'][1]*100).to_list()
 
 
     x = np.arange(len(labels))  # 标签位置
@@ -120,8 +122,10 @@ def plot_R2_bar(R_df, type):
     ax.bar(x + width , CA1, width, label='CA1', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[5]))
     ax.bar(x + width*2 , CA2, width, label='CA2', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[6]))
     ax.bar(x + width*3 , CA3, width, label='CA3', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
-    ax.bar(x + width*3 , CVAE0, width, label='CVAE0', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
-    ax.bar(x + width*3 , CVAE1, width, label='CVAE1', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
+    ax.bar(x + width*4 , CVAE0, width, label='CVAE0', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
+    ax.bar(x + width*5 , CVAE1, width, label='CVAE1', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
+    ax.bar(x + width*6 , CVAE2, width, label='CVAE2', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
+    ax.bar(x + width*7 , CVAE3, width, label='CVAE3', color=plt.get_cmap('OrRd')(np.linspace(0, 1, 8)[7]))
 
 
     ax.set_ylabel(f'Portfolio {type} R^2 (%)')
@@ -174,7 +178,8 @@ if __name__=="__main__":
     FFs = ["FF_1", "FF_2", "FF_3", "FF_4", "FF_5", "FF_6"]
     PCAs = ["PCA_1", "PCA_2", "PCA_3", "PCA_4", "PCA_5", "PCA_6"]
     IPCAs = ["IPCA_1", "IPCA_2", "IPCA_3", "IPCA_4", "IPCA_5", "IPCA_6"]
-    models = FFs + PCAs + IPCAs + CAs
+    CVAEs = [f'CVAE{prefix}_{suffix+1}' for prefix, suffix in zip(range(len(4)),range(len(6)))]
+    models = FFs + PCAs + IPCAs + CAs + CVAEs
     
     ## Plot R^2 bars
     total_R2 = []
