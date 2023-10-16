@@ -1,15 +1,20 @@
 import os
+import copy
 import pandas as pd
 import numpy as np
 import collections
-from .modelBase import modelBase
+from tqdm import tqdm
+from modelBase import modelBase
 from utils import CHARAS_LIST
 
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
+import warnings
+warnings.filterwarnings('ignore')
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MAX_EPOCH = 200
 
 class CA_base(nn.Module, modelBase):
@@ -34,6 +39,11 @@ class CA_base(nn.Module, modelBase):
         self.train_dataloader = None
         self.valid_dataloader = None
         self.test_dataloader = None
+        
+        self.pently_lambda = None
+        self.repeat = 10
+        self.smooth_steps = 5
+        self.lr = None
     
     
     def debug(self, month):
@@ -85,6 +95,27 @@ class CA_base(nn.Module, modelBase):
         processed_char = self.beta_nn(char)
         processed_pfret = self.factor_nn(pfret)
         return torch.sum(processed_char * processed_pfret, dim=1)
+    
+    
+    # ensemble estimation
+    def average_params(self, params_list):
+        assert isinstance(params_list, (tuple, list, collections.deque))
+        n = len(params_list)
+        if n == 1:
+            return params_list[0]
+        new_params = collections.OrderedDict()
+        keys = None
+        for i, params in enumerate(params_list):
+            if keys is None:
+                keys = params.keys()
+            for k, v in params.items():
+                if k not in keys:
+                    raise ValueError('the %d-th model has different params'%i)
+                if k not in new_params:
+                    new_params[k] = v / n
+                else:
+                    new_params[k] += v / n
+        return new_params
 
     
     # train_one_epoch
@@ -99,12 +130,11 @@ class CA_base(nn.Module, modelBase):
             factor_nn_input = factor_nn_input.squeeze(0).T
             labels = labels.squeeze(0)
             output = self.forward(beta_nn_input, factor_nn_input)
-            loss = self.criterion(output, labels)
-            
+            l1_regulization = torch.Tensor([torch.norm(i,p=1) for i in self.parameters()])
+            loss = self.criterion(output, labels) + self.pently_lambda * torch.sum(l1_regulization)
             loss.backward()
             self.optimizer.step()
             epoch_loss += loss.item()
-
             if i % 100 == 0:
                 # print(f'Batches: {i}, loss: {loss.item()}')
                 pass
@@ -123,6 +153,7 @@ class CA_base(nn.Module, modelBase):
             labels = labels.squeeze(0)
 
             output = self.forward(beta_nn_input, factor_nn_input)
+
             loss = self.criterion(output, labels)
             epoch_loss += loss.item()
 
@@ -137,46 +168,60 @@ class CA_base(nn.Module, modelBase):
         self.valid_dataloader = self.dataloader(self.valid_period)
         self.test_dataloader = self.dataloader(self.test_period)
         
-        min_error = np.Inf
-        no_update_steps = 0
-        valid_loss = []
-        train_loss = []
-        for i in range(MAX_EPOCH):
-            # print(f'Epoch {i}')
-            self.train()
-            train_error = self.__train_one_epoch()
-            train_loss.append(train_error)
-            
-            self.eval()
-            # valid and early stop
-            with torch.no_grad():
-                valid_error = self.__valid_one_epoch()
+        train_info = collections.defaultdict(int)
+        valid_info = collections.defaultdict(int)
+        for times in range(self.repeat):
+            print(f'Start Training Model ({times})')
+            min_error = np.Inf
+            no_update_steps = 0
+            valid_loss = []
+            train_loss = []
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+            self.reset_weight()
+            pbar = tqdm(np.arange(MAX_EPOCH), desc=f"Training")
+            for i in pbar:
+                # print(f'Epoch {i}')
+                self.train()
+                train_error = self.__train_one_epoch()
+                train_loss.append(train_error)
                 
-            valid_loss.append(valid_error)
-            if valid_error < min_error:
-                min_error = valid_error
-                no_update_steps = 0
-                # save model
-                torch.save(self.state_dict(), f'./saved_models/{self.name}.pt')
-            else:
-                no_update_steps += 1
-            
-            if no_update_steps > 2: # early stop, if consecutive 3 epoches no improvement on validation set
-                print(f'Early stop at epoch {i}')
-                break
-            # load from (best) saved model
-            self.load_state_dict(torch.load(f'./saved_models/{self.name}.pt'))
-        return train_loss, valid_loss
+                self.eval()
+                # valid and early stop
+                with torch.no_grad():
+                    valid_error = self.__valid_one_epoch()
+                pbar.set_postfix({f'train loss': np.mean(train_error), f'valid loss':np.mean(valid_error)})
+                valid_loss.append(valid_error)
+                if valid_error < min_error:
+                    min_error = valid_error
+                    no_update_steps = 0
+                    # save model
+                    torch.save(self.state_dict(), f'./saved_models/{times}{self.name}.pt')
+                else:
+                    no_update_steps += 1
+                
+                if no_update_steps > 5: # early stop, if consecutive 3 epoches no improvement on validation set
+                    print(f'Early stop at epoch {i}')
+                    break
+                # load from (best) saved model
+                self.load_state_dict(torch.load(f'./saved_models/{times}{self.name}.pt'))
+                
+            train_info[times] = train_loss
+            valid_info[times] = valid_loss
+        return train_info, valid_info
+    
+    
+    def load_ensemble_model(self):
+        params_list = collections.deque(maxlen=self.repeat)
+        for num_model in range(self.repeat):
+            params = self.load_state_dict(f'./saved_models/{num_model}{self.name}.pt')
+            params_list.append(params)
+        avg_params = self.average_params(params_list)        
+        self.load_state_dict(avg_params)
     
     
     def test_model(self):
-        # beta, factor, label = self.test_dataset
-        # i = np.random.randint(len(beta))
-        # beta_nn_input = beta[i]
-        # factor_nn_input = factor[i]
-        # labels = label[i]
+        self.load_ensemble_model()
         output = None
-        label = None
         for i, beta_nn_input, factor_nn_input, labels in enumerate(self.test_dataloader):
             # convert to tensor
             # beta_nn_input = torch.tensor(beta_nn_input, dtype=torch.float32).T.to(self.device)
@@ -223,6 +268,7 @@ class CA_base(nn.Module, modelBase):
     
     
     def inference(self, month):
+        self.load_ensemble_model()
         if len(self.omit_char) == 0:
             assert month >= self.test_period[0], f"Month error, {month} is not in test period {self.test_period}"
             
@@ -279,7 +325,7 @@ class CA_base(nn.Module, modelBase):
 
 
 class CA0(CA_base):
-    def __init__(self, hidden_size, lr=0.001, omit_char=[], device='cuda'):
+    def __init__(self, hidden_size, lr=0.001, pently_lambda = 0.4, omit_char=[], device=device):
         CA_base.__init__(self, name=f'CA0_{hidden_size}', omit_char=omit_char, device=device)
         # P -> K
         self.beta_nn = nn.Sequential(
@@ -287,16 +333,19 @@ class CA0(CA_base):
             nn.Linear(94, hidden_size)
         )
         self.factor_nn = nn.Sequential(
-            nn.Linear(94, hidden_size)
+            nn.Linear(94, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size)
         )
 
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         
 
 
 class CA1(CA_base):
-    def __init__(self, hidden_size, dropout=0.5, lr=0.001, omit_char=[], device='cuda'):
+    def __init__(self, hidden_size, dropout=0, lr=0.001, pently_lambda = 0.4, omit_char=[], device=device):
         CA_base.__init__(self, name=f'CA1_{hidden_size}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
@@ -310,16 +359,21 @@ class CA1(CA_base):
             nn.Linear(32, hidden_size)
         )
         self.factor_nn = nn.Sequential(
-            nn.Linear(94, hidden_size)
+            # hidden layer 1
+            nn.Linear(94, hidden_size),
+            nn.ReLU(),
+            # output layer
+            nn.Linear(hidden_size, hidden_size)
         )
         
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         
         
         
 class CA2(CA_base):
-    def __init__(self, hidden_size, dropout=0.5, lr=0.001, omit_char=[], device='cuda'):
+    def __init__(self, hidden_size, dropout=0, lr=0.001, pently_lambda = 0.4, omit_char=[], device=device):
         CA_base.__init__(self, name=f'CA2_{hidden_size}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> 16 -> K
@@ -338,16 +392,19 @@ class CA2(CA_base):
             nn.Linear(16, hidden_size)
         )
         self.factor_nn = nn.Sequential(
-            nn.Linear(94, hidden_size)
+            nn.Linear(94, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size)
         )
-
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
 
 
 
 class CA3(CA_base):
-    def __init__(self, hidden_size, dropout=0.5, lr=0.001, omit_char=[], device='cuda'):
+    def __init__(self, hidden_size, dropout=0, lr=0.001, pently_lambda = 0.4, omit_char=[], device=device):
         CA_base.__init__(self, name=f'CA3_{hidden_size}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> 16 -> 8 -> K
@@ -371,8 +428,16 @@ class CA3(CA_base):
             nn.Linear(8, hidden_size)
         )
         self.factor_nn = nn.Sequential(
-            nn.Linear(94, hidden_size)
+            nn.Linear(94, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size)
         )
         
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=0.01)
+        self.lr = lr
+        self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
+
+if __name__ == '__main__':
+    ca_model = CA0(2, lr=0.0005, pently_lambda = 0.02)
+    print(ca_model.test_period)
+    # ca_model.train_model()
