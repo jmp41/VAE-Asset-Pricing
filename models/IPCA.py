@@ -4,7 +4,7 @@ import numpy as np
 import sys
 sys.path.append('../')
 
-from utils import *
+from models.utils import *
 from .modelBase import modelBase
 
 

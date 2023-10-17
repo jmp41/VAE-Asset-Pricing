@@ -2,15 +2,18 @@ import os
 import pandas as pd
 import numpy as np
 import collections
-from modelBase import modelBase
+from models.modelBase import modelBase
 
-from utils import CHARAS_LIST
+from models.utils import CHARAS_LIST
 
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
 from tqdm import tqdm
+import faulthandler
+
+faulthandler.enable()
 
 MAX_EPOCH = 200
         
@@ -41,7 +44,7 @@ class CVAE_base(nn.Module, modelBase):
         self.test_dataloader = None
 
         self.pently_lambda = None
-        self.repeat = 2
+        self.repeat = 10
         self.lr = None
     
     def debug(self, month):
@@ -80,9 +83,9 @@ class CVAE_base(nn.Module, modelBase):
             factor_nn_input_set.append(_factor_input)
             label_set.append(label)
             
-        beta_nn_input_set = torch.tensor(beta_nn_input_set, dtype=torch.float32).to(self.device)
-        factor_nn_input_set = torch.tensor(factor_nn_input_set, dtype=torch.float32).to(self.device)
-        label_set = torch.tensor(label_set, dtype=torch.float32).to(self.device)
+        beta_nn_input_set = torch.from_numpy(np.array(beta_nn_input_set)).float().to(self.device)
+        factor_nn_input_set = torch.from_numpy(np.array(factor_nn_input_set)).float().to(self.device)
+        label_set = torch.from_numpy(np.array(label_set)).float().to(self.device)
 
         dataset = TensorDataset(beta_nn_input_set, factor_nn_input_set, label_set)   
         return DataLoader(dataset, batch_size=1, shuffle=True)
@@ -107,6 +110,7 @@ class CVAE_base(nn.Module, modelBase):
             labels = labels.squeeze(0)
             output, mu, log_var = self.forward(beta_nn_input, factor_nn_input)
             l1_regulization = torch.Tensor([torch.norm(i,p=1) for i in self.parameters()])
+            # print(torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0))
 
             loss = self.criterion(output, labels) + self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0) + \
                 self.pently_lambda * torch.sum(l1_regulization)
@@ -133,7 +137,6 @@ class CVAE_base(nn.Module, modelBase):
 
             output, mu, log_var = self.forward(beta_nn_input, factor_nn_input)
             loss = self.criterion(output, labels) + self.lambdas*torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-
             epoch_loss += loss.item()
             
         return epoch_loss / len(self.valid_dataloader)
@@ -150,14 +153,14 @@ class CVAE_base(nn.Module, modelBase):
         train_info = collections.defaultdict(int)
         valid_info = collections.defaultdict(int)
         for times in range(self.repeat):
-            print(f'Start Training Model ({times})')
+            # print(f'Start Training Model ({times})')
             min_error = np.Inf
             no_update_steps = 0
             valid_loss = []
             train_loss = []
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
             self.reset_weight()
-            pbar = tqdm(np.arange(MAX_EPOCH), desc=f"Training")
+            pbar = tqdm(np.arange(MAX_EPOCH), desc ="Training")
             for i in pbar:
                 # print(f'Epoch {i}')
                 self.train()
@@ -179,7 +182,7 @@ class CVAE_base(nn.Module, modelBase):
                     no_update_steps += 1
                 
                 if no_update_steps > 5: # early stop, if consecutive 3 epoches no improvement on validation set
-                    print(f'Early stop at epoch {i}')
+                    # print(f'Early stop at epoch {i}')
                     break
                 # load from (best) saved model
                 self.load_state_dict(torch.load(f'./saved_models/{times}{self.name}.pt'))
@@ -245,11 +248,11 @@ class CVAE_base(nn.Module, modelBase):
             factor_nn_input = factor_nn_input.values.T # P*1
 
         factor_nn_input = torch.tensor(factor_nn_input, dtype=torch.float32).T.to(self.device) # 1*P
-        factor_pred,_,_ = self.factor_nn(factor_nn_input).T # K*1
+        factor_pred,_,_ = self.factor_nn(factor_nn_input) # K*1
         
-        self.factor_nn_pred.append(factor_pred)
+        self.factor_nn_pred.append(factor_pred.T)
         
-        return factor_pred # K*1
+        return factor_pred.T # K*1
     
     
     def inference(self, month):
@@ -308,29 +311,22 @@ class CVAE_base(nn.Module, modelBase):
 
 
 class LinearVAE(nn.Module):
-    def __init__(self, hidden_size, latent_dim) -> None:
+    def __init__(self, latent_dim) -> None:
         super(LinearVAE, self).__init__()
         
-        self.encoder = nn.Linear(94, hidden_size)
-        self.fc_mu = nn.Linear(hidden_size, latent_dim)
-        self.fc_var = nn.Linear(hidden_size, latent_dim)
-        self.decoder = nn.Linear(latent_dim, hidden_size)
-        self.final_layer = nn.Linear(hidden_size, hidden_size)
+        self.encoder = nn.Linear(94, 32)
+        self.fc_mu = nn.Linear(32, latent_dim)
+        self.fc_var = nn.Linear(32, latent_dim)
+        self.decoder = nn.Linear(latent_dim,latent_dim)
     
-    def encode(self,inputs):
+    def encode(self, inputs):
         result = self.encoder(inputs)
         # result = torch.flatten(result, start_dim=1)
-
         # Split the result into mu and var components
         # of the latent Gaussian distribution
         mu = self.fc_mu(result)
         log_var = self.fc_var(result)
         return [mu, log_var]
-    
-    def decode(self, z):
-        result = self.decoder(z)
-        result = self.final_layer(result)
-        return result
 
     def reparameterize(self, mu, logvar):
         """
@@ -347,15 +343,15 @@ class LinearVAE(nn.Module):
     def forward(self, inputs):
         mu, log_var = self.encode(inputs)
         z = self.reparameterize(mu, log_var)
-        return  self.decode(z), mu, log_var
+        return  self.decoder(z), mu, log_var
 
 
 class CVAE(nn.Module):
-    def __init__(self, hidden_size, latent_dim) -> None:
+    def __init__(self, latent_dim) -> None:
         super(CVAE, self).__init__()
         
         modules = []
-        hidden_dims = [hidden_size*4, hidden_size*2, hidden_size]
+        hidden_dims = [32, 16, 8]
         in_channels = 94
         # Build Encoder
         for h_dim in hidden_dims:
@@ -369,18 +365,7 @@ class CVAE(nn.Module):
         self.encoder = nn.Sequential(*modules)
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
         self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
-        modules = []
-        hidden_dims.reverse()
-        self.map = nn.Linear(latent_dim, hidden_dims[0])
-        for i in range(len(hidden_dims) - 1):
-            modules.append(
-                nn.Sequential(
-                    nn.Linear(hidden_dims[i],hidden_dims[i + 1]),
-                    nn.LeakyReLU())
-            )
-
-        self.decoder = nn.Sequential(*modules)
-        self.final_layer = nn.Linear(hidden_dims[-1], 1)
+        self.decoder = nn.Linear(latent_dim, latent_dim)
     
     def encode(self,inputs):
         result = self.encoder(inputs)
@@ -391,17 +376,9 @@ class CVAE(nn.Module):
         mu = self.fc_mu(result)
         log_var = self.fc_var(result)
         return [mu, log_var]
-    
-    def decode(self, z):
-        z = self.map(z)
-        result = self.decoder(z)
-        result = self.final_layer(result)
-        return result
 
     def reparameterize(self, mu, logvar):
         """
-        Will a single z be enough ti compute the expectation
-        for the loss??
         :param mu: (Tensor) Mean of the latent Gaussian
         :param logvar: (Tensor) Standard deviation of the latent Gaussian
         :return:
@@ -413,19 +390,19 @@ class CVAE(nn.Module):
     def forward(self, inputs):
         mu, log_var = self.encode(inputs)
         z = self.reparameterize(mu, log_var)
-        return  self.decode(z), mu, log_var
+        return  self.decoder(z), mu, log_var
 
 
 class CVAE0(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE0_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
+    def __init__(self, latent_dim, lambdas, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE0_{latent_dim}', omit_char=omit_char, device=device)
         # P -> K
 
         self.beta_nn = nn.Sequential(
             # output layer
-            nn.Linear(94, hidden_size)
+            nn.Linear(94, latent_dim)
         )
-        self.factor_nn = LinearVAE(hidden_size, latent_dim)
+        self.factor_nn = LinearVAE(latent_dim)
 
         self.lr = lr
         self.pently_lambda = pently_lambda
@@ -435,8 +412,8 @@ class CVAE0(CVAE_base):
 
 
 class CVAE1(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE1_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
+    def __init__(self, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE1_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -446,9 +423,9 @@ class CVAE1(CVAE_base):
             nn.ReLU(),
             nn.Dropout(self.dropout),
             # output layer
-            nn.Linear(32, hidden_size)
+            nn.Linear(32, latent_dim)
         )
-        self.factor_nn = CVAE(hidden_size, latent_dim)
+        self.factor_nn = CVAE(latent_dim)
         
         self.lr = lr
         self.pently_lambda = pently_lambda
@@ -457,8 +434,8 @@ class CVAE1(CVAE_base):
         
 
 class CVAE2(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE2_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
+    def __init__(self, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE2_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -473,9 +450,9 @@ class CVAE2(CVAE_base):
             nn.ReLU(),
             nn.Dropout(self.dropout),
             # output layer
-            nn.Linear(16, hidden_size)
+            nn.Linear(16, latent_dim)
         )
-        self.factor_nn = CVAE(hidden_size, latent_dim)
+        self.factor_nn = CVAE(latent_dim)
         
         self.lr = lr
         self.pently_lambda = pently_lambda
@@ -484,8 +461,8 @@ class CVAE2(CVAE_base):
         
 
 class CVAE3(CVAE_base):
-    def __init__(self, hidden_size, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
-        CVAE_base.__init__(self, name=f'CVAE3_{hidden_size}_{latent_dim}', omit_char=omit_char, device=device)
+    def __init__(self, latent_dim, lambdas, dropout=0.2, lr=0.001, pently_lambda = 0.04, omit_char=[], device='cpu'):
+        CVAE_base.__init__(self, name=f'CVAE3_{latent_dim}', omit_char=omit_char, device=device)
         self.dropout = dropout
         # P -> 32 -> K
         self.beta_nn = nn.Sequential(
@@ -505,19 +482,18 @@ class CVAE3(CVAE_base):
             nn.ReLU(),
             nn.Dropout(self.dropout),
             # output layer
-            nn.Linear(8, hidden_size)
+            nn.Linear(8, latent_dim)
         )
-        self.factor_nn = CVAE(hidden_size, latent_dim)
+        self.factor_nn = CVAE(latent_dim)
         
         self.lr = lr
         self.pently_lambda = pently_lambda
         self.criterion = nn.MSELoss().to(device)
         self.lambdas = lambdas
 
-if __name__=='__main__':
-    hidden_size = 6
-    latent_size = 3
-    lambdas = 1
-    pently_lambda = 0.01
-    model = CVAE1(hidden_size, latent_size, lambdas,lr=0.0001, pently_lambda=pently_lambda)
-    model.train_model()
+# if __name__=='__main__':
+#     latent_size = 3
+#     lambdas = 1
+#     pently_lambda = 0.01
+#     model = CVAE1(latent_size, lambdas,lr=0.0001, pently_lambda=pently_lambda)
+#     model.train_model()

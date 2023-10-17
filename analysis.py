@@ -25,10 +25,14 @@ def calculate_R2(model, type, input=None, complete_r=None):
         model_output = input
         model_output = pd.DataFrame(model_output, columns=CHARAS_LIST)
         model_output['DATE'] = oos_ret['DATE'].to_list()
-  
+    names = model_output.columns.values
+    names[0] = 'DATE'
+    model_output.columns = names
+
     for col in model_output.columns: # hard code for format error
-        model_output[col] = model_output[col].apply(lambda x: float(str(x).replace('[', '').replace(']', '')))
-    
+        if col!='DATE':
+            model_output[col] = model_output[col].apply(lambda x: float(str(x).replace('[', '').replace(']', '')))
+
     residual_square = ((oos_ret.set_index('DATE') - model_output.set_index('DATE'))**2).dropna()
     residual_square = (1 - (residual_square == np.inf) * 1.0) * residual_square # drop Inf outliers
     
@@ -63,6 +67,10 @@ def alpha_plot(model, type, save_dir='imgs'):
     
     output_path = f'results/{type}/{model.name}_{type}.csv'
     inference_result = pd.read_csv(output_path)
+    names = inference_result.columns.values
+    names[0] = 'DATE'
+    inference_result.columns = names
+
     inference_result = inference_result.set_index('DATE')
     
     pricing_error_analysis = []
@@ -178,7 +186,7 @@ if __name__=="__main__":
     FFs = ["FF_1", "FF_2", "FF_3", "FF_4", "FF_5", "FF_6"]
     PCAs = ["PCA_1", "PCA_2", "PCA_3", "PCA_4", "PCA_5", "PCA_6"]
     IPCAs = ["IPCA_1", "IPCA_2", "IPCA_3", "IPCA_4", "IPCA_5", "IPCA_6"]
-    CVAEs = [f'CVAE{prefix}_{suffix+1}' for prefix, suffix in zip(range(len(4)),range(len(6)))]
+    CVAEs = [f'CVAE{prefix}_{suffix+1}' for prefix, suffix in zip(range(4),range(6))]
     models = FFs + PCAs + IPCAs + CAs + CVAEs
     
     ## Plot R^2 bars

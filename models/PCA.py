@@ -4,7 +4,7 @@ sys.path.append('../')
 import pandas as pd
 import numpy as np
 
-from utils import *
+from models.utils import *
 from .modelBase import modelBase
 
 
