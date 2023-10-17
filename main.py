@@ -3,6 +3,7 @@ from models.PCA import PCA
 from models.FF import FF
 from models.IPCA import IPCA
 from models.CA import CA0, CA1, CA2, CA3
+from models.CVAE import CVAE0, CVAE1, CVAE2,CVAE3
 
 import gc
 import argparse
@@ -11,7 +12,7 @@ import numpy as np
 import time
 import json
 from tqdm import tqdm
-from utils import *
+from models.utils import *
 from analysis import *
 import matplotlib.pyplot as plt
 from itertools import product
@@ -19,7 +20,7 @@ import os
 
 import warnings
 warnings.filterwarnings('ignore')
-
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def model_inference_and_predict(model):
@@ -59,7 +60,7 @@ def model_inference_and_predict_CA(model):
     Inference and Prediction of NN models:
     Returns: model.name_inference.csv & model.name_inference.csv saved in path 'results'
     """
-    model = model.to('cuda')
+    model = model.to(device)
     mon_list = pd.read_pickle('data/mon_list.pkl')
     test_mons = mon_list.loc[(mon_list >= model.test_period[0])]
     
@@ -74,20 +75,21 @@ def model_inference_and_predict_CA(model):
     stock_index = pd.Series(dtype=np.int64)
     for g in T_bar: # rolling train, refit once a year
         T_bar.set_postfix({'Year': g[0]})
+        
+        if device=='cuda':
+            model.release_gpu()
+            # release GPU memory
+            for _ in range(6): # call function multiple times to clear the cuda cache
+                torch.cuda.empty_cache()
 
-        model.reset_weight()
-        model.release_gpu()
-        # release GPU memory
-        for _ in range(6): # call function multiple times to clear the cuda cache
-            torch.cuda.empty_cache()
-            
         train_loss, val_loss = model.train_model()
         # plot loss
-        plt.plot(train_loss, label='train_loss')
-        plt.plot(val_loss, label='val_loss')
-        plt.legend()
-        plt.savefig(f'results/train_loss/{model.name}_loss_{g[0]}.png')
-        plt.close()
+        for times in range(len(train_loss)):
+            plt.plot(train_loss[times], label='train_loss')
+            plt.plot(val_loss[times], label='val_loss')
+            plt.legend()
+            plt.savefig(f'results/train_loss/{times}{model.name}_loss_{g[0]}.png')
+            plt.close()
 
         for m in g[1].to_list():
             m_stock_index, _, _, _ = model._get_item(m)
@@ -134,7 +136,7 @@ def git_push(msg):
 
 
 def model_selection(model_type, model_K, omit_char=[]):
-    assert model_type in ['FF', 'PCA', 'IPCA', 'CA0', 'CA1', 'CA2', 'CA3'], f'No Such Model: {model_type}'
+    assert model_type in ['FF', 'PCA', 'IPCA', 'CA0', 'CA1', 'CA2', 'CA3', 'CVAE0', 'CVAE1', 'CVAE2', 'CVAE3'], f'No Such Model: {model_type}'
     
     if model_type == 'FF':
         return {
@@ -161,35 +163,60 @@ def model_selection(model_type, model_K, omit_char=[]):
         return {
             'name': f'CA0_{model_K}',
             'omit_char': omit_char,
-            'model': CA0(hidden_size=model_K, lr=CA_LR, omit_char=omit_char)
+            'model': CA0(hidden_size=model_K, pently_lambda = CA_PL, lr=CA_LR, omit_char=omit_char)
         } 
             
     elif model_type == 'CA1':
         return {
             'name': f'CA1_{model_K}',
             'omit_char': omit_char,
-            'model': CA1(hidden_size=model_K, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+            'model': CA1(hidden_size=model_K,pently_lambda = CA_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
         } 
     
     elif model_type == 'CA2':
         return {
             'name': f'CA2_{model_K}',
             'omit_char': omit_char,
-            'model': CA2(hidden_size=model_K, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+            'model': CA2(hidden_size=model_K,pently_lambda = CA_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
         } 
         
-    else:
+    elif model_type == 'CA3':
         return {
             'name': f'CA3_{model_K}',
             'omit_char': omit_char,
-            'model': CA3(hidden_size=model_K, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+            'model': CA3(hidden_size=model_K,pently_lambda = CA_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+        } 
+    
+    elif model_type == 'CVAE0':
+        return {
+            'name': f'CVAE0_{model_K}',
+            'omit_char': omit_char,
+            'model': CVAE0(latent_dim=model_K, lambdas=CVAE_L,pently_lambda = CVAE_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+        } 
+    elif model_type == 'CVAE1':
+        return {
+            'name': f'CVAE1_{model_K}',
+            'omit_char': omit_char,
+            'model': CVAE1(latent_dim=model_K, lambdas=CVAE_L,pently_lambda = CVAE_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+        } 
+    elif model_type == 'CVAE2':
+        return {
+            'name': f'CVAE2_{model_K}',
+            'omit_char': omit_char,
+            'model': CVAE2(latent_dim=model_K, lambdas=CVAE_L,pently_lambda = CVAE_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
+        } 
+    elif model_type == 'CVAE3':
+        return {
+            'name': f'CVAE3_{model_K}',
+            'omit_char': omit_char,
+            'model': CVAE3(latent_dim=model_K, lambdas=CVAE_L,pently_lambda = CVAE_PL, dropout=CA_DR, lr=CA_LR, omit_char=omit_char)
         } 
         
  
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--Model', type=str, default='FF PCA IPCA CA0 CA1 CA2 CA3')
+    parser.add_argument('--Model', type=str, default='FF PCA IPCA CA0 CA1 CA2 CA3 CVAE0 CVAE1 CVAE2 CVAE3')
     parser.add_argument('--K', type=str, default='1 2 3 4 5 6')
     parser.add_argument('--omit_char', type=str, default='')
 
@@ -220,8 +247,7 @@ if __name__ == "__main__":
         print(f"{time.strftime('%a, %d %b %Y %H:%M:%S +0800', time.gmtime())} | Model: {model['name']} | {omit_chars}")
         print('name : ', model['name'])
         models_name.append(model['name'])
-
-        if model['name'].split('_')[0][:-1] == 'CA':
+        if model['name'].split('_')[0][:-1] == 'CA' or model['name'].split('_')[0][:-1] == 'CVAE' :
             print('model_inference_and_predict_CA')
             # if have omit char, inf_ret (T, N, m)
             inf_ret = model_inference_and_predict_CA(model['model'])  

@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import collections
 from tqdm import tqdm
-from modelBase import modelBase
-from utils import CHARAS_LIST
+from models.modelBase import modelBase
+from models.utils import CHARAS_LIST
 
 import torch
 from torch import nn
@@ -41,7 +41,7 @@ class CA_base(nn.Module, modelBase):
         self.test_dataloader = None
         
         self.pently_lambda = None
-        self.repeat = 2
+        self.repeat = 1
         self.lr = None
     
     
@@ -177,7 +177,7 @@ class CA_base(nn.Module, modelBase):
             train_loss = []
             self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
             self.reset_weight()
-            pbar = tqdm(np.arange(MAX_EPOCH), desc=f"Training")
+            pbar = tqdm(np.arange(MAX_EPOCH), desc ="Training")
             for i in pbar:
                 # print(f'Epoch {i}')
                 self.train()
@@ -206,6 +206,7 @@ class CA_base(nn.Module, modelBase):
                 
             train_info[times] = train_loss
             valid_info[times] = valid_loss
+        # self.load_ensemble_model()
         return train_info, valid_info
     
     
@@ -218,23 +219,7 @@ class CA_base(nn.Module, modelBase):
             params_list.append(params)
         avg_params = self.average_params(params_list)        
         self.load_state_dict(avg_params)
-    
-    
-    def test_model(self):
-        self.load_ensemble_model()
-        output = None
-        for i, (beta_nn_input, factor_nn_input, labels) in enumerate(self.test_dataloader):
-            beta_nn_input = beta_nn_input.squeeze(0).T
-            factor_nn_input = factor_nn_input.squeeze(0).T
-            labels = labels.squeeze(0)
-            output = self.forward(beta_nn_input, factor_nn_input)
-
-        loss = self.criterion(output, labels)
-        print(f'Test loss: {loss.item()}')
-        # print(f'Predicted: {output}')
-        # print(f'Ground truth: {labels}')
-        return output, labels
-
+        
 
     def calBeta(self, month, skip_char=[]):
         _, beta_nn_input, _, _ = self._get_item(month) # beta input: 94*94 = P*N
@@ -267,7 +252,6 @@ class CA_base(nn.Module, modelBase):
     
     
     def inference(self, month):
-        self.load_ensemble_model()
         if len(self.omit_char) == 0:
             assert month >= self.test_period[0], f"Month error, {month} is not in test period {self.test_period}"
             
@@ -333,8 +317,6 @@ class CA0(CA_base):
         )
         self.factor_nn = nn.Sequential(
             nn.Linear(94, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size)
         )
 
         self.lr = lr
